@@ -8,7 +8,7 @@ this, but for the first assignment you are given code templates in
 To start out, you must "clone" this repository:
 
 ```
-   git clone https://github.com/IUCompilerCourse/public-student-support-code.git course-compiler
+   git clone https://github.com/Compilers-S26-IIITH/<your repo>.git course-compiler
 ```
 
 This creates a new folder `course-compiler`, which you can enter with:
