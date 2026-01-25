@@ -80,9 +80,39 @@
     [(Program info e) (Program info ((uniquify-exp '()) e))]))
 
 ;; remove-complex-opera* : Lvar -> Lvar^mon
+
+
+(define (rco-atom e)
+  (match e
+  [(Var x) (values (Var x) '())]
+  [(Int n) (values (Int n) '())]
+  [else
+    (define tmp (gensym 'tmp))
+    (define new-e (rco-exp e))
+    (values (Var tmp) (dict-set '() tmp new-e))]))
+
+(define (rco-exp e)
+  (match e
+    [(Var x) (Var x)]
+    [(Int n) (Int n)]
+    [(Let x rhs body)
+     (Let x (rco-exp rhs) (rco-exp body))]
+    [(Prim op es)
+     (define-values (atoms bindings-lists)
+       (for/lists (n1 n2) ([arg es])
+         (rco-atom arg)))
+     
+     (define all-bindings (apply append bindings-lists))
+     (define core (Prim op atoms))
+     
+     (for/fold ([body core])
+               ([(lhs rhs) (in-dict (reverse all-bindings))])
+       (Let lhs rhs body))]))
+
+
 (define (remove-complex-opera* p)
   (match p
-    [(Program info e (Program info e))]))
+    [(Program info e) (Program info (rco-exp e))]))
   
 ;; explicate-control : Lvar^mon -> Cvar
 (define (explicate-control p)
@@ -111,7 +141,7 @@
   `(
      ;; Uncomment the following passes as you finish them.
      ("uniquify" ,uniquify ,interp_Lvar ,type-check-Lvar)
-     ;; ("remove complex opera*" ,remove-complex-opera* ,interp_Lvar ,type-check-Lvar)
+     ("remove complex opera*" ,remove-complex-opera* ,interp_Lvar ,type-check-Lvar)
      ;; ("explicate control" ,explicate-control ,interp-Cvar ,type-check-Cvar)
      ;; ("instruction selection" ,select-instructions ,interp-pseudo-x86-0)
      ;; ("assign homes" ,assign-homes ,interp-x86-0)
