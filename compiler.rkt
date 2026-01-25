@@ -61,10 +61,16 @@
   (lambda (e)
     (match e
       [(Var x)
-       (error "TODO: code goes here (uniquify-exp Var)")]
+       (Var (dict-ref env x x))]
       [(Int n) (Int n)]
       [(Let x e body)
-       (error "TODO: code goes here (uniquify-exp Let)")]
+       (define new-x (gensym x))
+       (define new-e ((uniquify-exp env) e))
+       (define new-env (dict-set env x new-x))
+       (define new-body ((uniquify-exp new-env) body))
+       
+       (Let new-x new-e new-body)
+       ]
       [(Prim op es)
        (Prim op (for/list ([e es]) ((uniquify-exp env) e)))])))
 
@@ -75,8 +81,9 @@
 
 ;; remove-complex-opera* : Lvar -> Lvar^mon
 (define (remove-complex-opera* p)
-  (error "TODO: code goes here (remove-complex-opera*)"))
-
+  (match p
+    [(Program info e (Program info e))]))
+  
 ;; explicate-control : Lvar^mon -> Cvar
 (define (explicate-control p)
   (error "TODO: code goes here (explicate-control)"))
@@ -103,7 +110,7 @@
 (define compiler-passes
   `(
      ;; Uncomment the following passes as you finish them.
-     ;; ("uniquify" ,uniquify ,interp_Lvar ,type-check-Lvar)
+     ("uniquify" ,uniquify ,interp_Lvar ,type-check-Lvar)
      ;; ("remove complex opera*" ,remove-complex-opera* ,interp_Lvar ,type-check-Lvar)
      ;; ("explicate control" ,explicate-control ,interp-Cvar ,type-check-Cvar)
      ;; ("instruction selection" ,select-instructions ,interp-pseudo-x86-0)
