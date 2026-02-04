@@ -184,9 +184,30 @@
   (match a
     [(Int n) (Imm n)]
     [(Var x) (Var x)]))
+    
 ;; assign-homes : x86var -> x86var
 (define (assign-homes p)
-  (error "TODO: code goes here (assign-homes)"))
+  (match p
+    [(X86Program info blocks)
+     (define vars (map fst (dict-ref info 'locals-types '())))
+     (define home-map 
+       (for/list ([v vars] [i (in-naturals 1)])
+         (cons v (Deref 'rbp (* -8 i)))))
+     (define (assign-arg a)
+       (match a
+         [(Var x) (dict-ref home-map x)]
+         [else a]))
+     (define (assign-instr i)
+       (match i
+         [(Instr op args) (Instr op (map assign-arg args))]
+         [else i]))
+     (define new-blocks
+       (for/list ([(label block) (in-dict blocks)])
+         (match block
+           [(Block b-info instrs) 
+            (cons label (Block b-info (map assign-instr instrs)))])))
+     (X86Program (dict-set info 'stack-space (* 8 (length vars))) new-blocks)]))
+
 
 ;; patch-instructions : x86var -> x86int
 (define (patch-instructions p)
@@ -206,7 +227,7 @@
      ("remove complex opera*" ,remove-complex-opera* ,interp_Lvar ,type-check-Lvar)
      ("explicate control" ,explicate-control ,interp-Cvar ,type-check-Cvar)
      ("instruction selection" ,select-instructions ,interp-pseudo-x86-0)
-     ;; ("assign homes" ,assign-homes ,interp-x86-0)
+     ("assign homes" ,assign-homes ,interp-x86-0)
      ;; ("patch instructions" ,patch-instructions ,interp-x86-0)
      ;; ("prelude-and-conclusion" ,prelude-and-conclusion ,interp-x86-0)
      ))
