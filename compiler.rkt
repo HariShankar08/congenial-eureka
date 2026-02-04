@@ -208,10 +208,23 @@
             (cons label (Block b-info (map assign-instr instrs)))])))
      (X86Program (dict-set info 'stack-space (* 8 (length vars))) new-blocks)]))
 
-
 ;; patch-instructions : x86var -> x86int
 (define (patch-instructions p)
-  (error "TODO: code goes here (patch-instructions)"))
+  (match p
+    [(X86Program info blocks)
+     (define (patch-instr i)
+       (match i
+         [(Instr op (list (Deref r1 o1) (Deref r2 o2)))
+          (list (Instr 'movq (list (Deref r1 o1) (Reg 'rax)))
+                (Instr op (list (Reg 'rax) (Deref r2 o2))))]
+         [else (list i)]))
+     (define new-blocks
+       (for/list ([(label block) (in-dict blocks)])
+         (match block
+           [(Block b-info instrs)
+            (cons label (Block b-info (append-map patch-instr instrs)))])))
+     (X86Program info new-blocks)]))
+
 
 ;; prelude-and-conclusion : x86int -> x86int
 (define (prelude-and-conclusion p)
@@ -228,6 +241,6 @@
      ("explicate control" ,explicate-control ,interp-Cvar ,type-check-Cvar)
      ("instruction selection" ,select-instructions ,interp-pseudo-x86-0)
      ("assign homes" ,assign-homes ,interp-x86-0)
-     ;; ("patch instructions" ,patch-instructions ,interp-x86-0)
+     ("patch instructions" ,patch-instructions ,interp-x86-0)
      ;; ("prelude-and-conclusion" ,prelude-and-conclusion ,interp-x86-0)
      ))
