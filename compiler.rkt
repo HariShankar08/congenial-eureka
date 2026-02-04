@@ -145,8 +145,45 @@
   
 ;; select-instructions : Cvar -> x86var
 (define (select-instructions p)
-  (error "TODO: code goes here (select-instructions)"))
+  (match p
+    [(CProgram info blocks)
+     (define new-blocks
+       (for/list ([(label tail) (in-dict blocks)])
+         (cons label (Block '() (select-instr-tail tail)))))
+     (X86Program info new-blocks)]))
 
+(define (select-instr-tail t)
+  (match t
+    [(Return e)
+     (append (select-instr-exp e (Reg 'rax))
+             (list (Jmp 'conclusion)))]
+    [(Seq stmt tail)
+     (append (select-instr-stmt stmt)
+             (select-instr-tail tail))]
+    [else (error "select-instr-tail unhandled case" t)]))
+
+(define (select-instr-stmt s)
+  (match s
+    [(Assign (Var x) e)
+     (select-instr-exp e (Var x))]))
+
+(define (select-instr-exp e dest)
+  (match e
+    [(Int n) (list (Instr 'movq (list (Imm n) dest)))]
+    [(Var x) (list (Instr 'movq (list (Var x) dest)))]
+    [(Prim 'read '()) (list (Instr 'callq (list 'read_int))
+                            (Instr 'movq (list (Reg 'rax) dest)))]
+    [(Prim '+ (list e1 e2))
+     (list (Instr 'movq (list (select-atom e1) dest))
+           (Instr 'addq (list (select-atom e2) dest)))]
+    [(Prim '- (list e1))
+     (list (Instr 'movq (list (select-atom e1) dest))
+           (Instr 'negq (list dest)))]))
+
+(define (select-atom a)
+  (match a
+    [(Int n) (Imm n)]
+    [(Var x) (Var x)]))
 ;; assign-homes : x86var -> x86var
 (define (assign-homes p)
   (error "TODO: code goes here (assign-homes)"))
@@ -168,7 +205,7 @@
      ("uniquify" ,uniquify ,interp_Lvar ,type-check-Lvar)
      ("remove complex opera*" ,remove-complex-opera* ,interp_Lvar ,type-check-Lvar)
      ("explicate control" ,explicate-control ,interp-Cvar ,type-check-Cvar)
-     ;; ("instruction selection" ,select-instructions ,interp-pseudo-x86-0)
+     ("instruction selection" ,select-instructions ,interp-pseudo-x86-0)
      ;; ("assign homes" ,assign-homes ,interp-x86-0)
      ;; ("patch instructions" ,patch-instructions ,interp-x86-0)
      ;; ("prelude-and-conclusion" ,prelude-and-conclusion ,interp-x86-0)
