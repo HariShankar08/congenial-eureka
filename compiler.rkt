@@ -246,6 +246,58 @@
                blocks))
      (X86Program info new-blocks)]))
 
+;; uncover-live : x86var -> x86var
+(define (uncover-live p)
+  (match p
+    [(X86Program info blocks)
+     (X86Program info
+       (for/list ([(label block) (in-dict blocks)])
+         (cons label (uncover-live-block block))))]))
+
+;; Performs liveness analysis on a single block (backward pass)
+(define (uncover-live-block b)
+  (match b
+    [(Block info instrs)
+     (define-values (new-instrs final-live)
+       (for/fold ([acc-instrs '()]
+                  [live-after (set)])
+                 ([instr (reverse instrs)])
+         (let* ([live-before (compute-live-before instr live-after)]
+                ;; Store the liveness information in the instruction info
+                [instr-with-live (add-live-to-instr instr live-after)])
+           (values (cons instr-with-live acc-instrs) live-before))))
+     (Block (dict-set info 'live-after final-live) new-instrs)]))
+
+;; Helper to extract variables/registers from an instruction's arguments
+(define (get-vars arg)
+  (match arg
+    [(Var x) (set x)]
+    [(Reg r) (set r)]
+    [else (set)]))
+
+;; Logic to determine what variables an instruction defines (def) and uses (use)
+(define (compute-live-before instr live-after)
+  (match instr
+    [(Instr 'movq (list src dest))
+     (set-union (set-remove live-after (get-vars dest)) (get-vars src))]
+    [(Instr op (list src dest)) ;; For addq, subq, etc. (dest = dest op src)
+     (set-union (set-remove live-after (get-vars dest)) 
+                (get-vars src) (get-vars dest))]
+    [(Instr 'negq (list dest))
+     (set-union (set-remove live-after (get-vars dest)) (get-vars dest))]
+    [(Instr 'callq (list target)) ;; Calls clobber caller-save registers
+     (set-union (set-subtract live-after caller-save) (get-vars target))]
+    [(Retq) (set 'rax)] ;; Return uses rax
+    [(Jmp target) live-after] ;; Standard jumps don't change liveness directly
+    [else live-after]))
+
+;; Simple wrapper to attach liveness info to instructions if your AST supports it
+;; Otherwise, this can be stored in a side-table.
+(define (add-live-to-instr instr live-set)
+  ;; Depending on your project requirements, you might wrap this 
+  ;; in a custom struct or just return the instr.
+  instr)
+
 ;; Define the compiler passes to be used by interp-tests and the grader
 ;; Note that your compiler file (the file that defines the passes)
 ;; must be named "compiler.rkt"
@@ -259,4 +311,5 @@
      ("assign homes" ,assign-homes ,interp-x86-0)
      ("patch instructions" ,patch-instructions ,interp-x86-0)
      ("prelude-and-conclusion" ,prelude-and-conclusion ,interp-x86-0)
+     ("uncover-live" ,uncover-live ,interp-pseudo-x86-0)
      ))
