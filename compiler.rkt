@@ -239,20 +239,42 @@
      (X86Program info new-blocks)]))
 
 
-;; prelude-and-conclusion : x86int -> x86int
+;; Helper: Generate push instructions for used callee-saved registers
+(define (make-pushes regs)
+  (for/list ([r regs])
+    (Instr 'pushq (list (Reg r)))))
+
+;; Helper: Generate pop instructions for used callee-saved registers (reverse order)
+(define (make-pops regs)
+  (for/list ([r (reverse regs)])
+    (Instr 'popq (list (Reg r)))))
+
 (define (prelude-and-conclusion p)
   (match p
     [(X86Program info blocks)
-     (define stack-size (align (dict-ref info 'stack-space 0) 16))
+     (define used-callee (dict-ref info 'used-callee '()))
+     (define num-callee (length used-callee))
+     (define num-spills (/ (dict-ref info 'stack-space 0) 8))
+     
+     ;; Calculate alignment: A = align(8S + 8C) - 8C
+     (define ss-total (align (+ (* 8 num-spills) (* 8 num-callee)) 16))
+     (define stack-adj (- ss-total (* 8 num-callee)))
+     
      (define main-prelude
-       (list (Instr 'pushq (list (Reg 'rbp)))
-             (Instr 'movq (list (Reg 'rsp) (Reg 'rbp)))
-             (Instr 'subq (list (Imm stack-size) (Reg 'rsp)))
-             (Jmp 'start)))
+       (append
+        (list (Instr 'pushq (list (Reg 'rbp)))
+              (Instr 'movq (list (Reg 'rsp) (Reg 'rbp))))
+        (make-pushes used-callee)
+        (if (zero? stack-adj) '() (list (Instr 'subq (list (Imm stack-adj) (Reg 'rsp)))))
+        (list (Jmp 'start))))
+     
      (define conclusion
-       (list (Instr 'addq (list (Imm stack-size) (Reg 'rsp)))
-             (Instr 'popq (list (Reg 'rbp)))
-             (Retq)))
+       (append
+        (if (zero? stack-adj) '() (list (Instr 'addq (list (Imm stack-adj) (Reg 'rsp)))))
+        (make-pops used-callee)
+        (list (Instr 'popq (list (Reg 'rbp)))
+              (Retq))))
+     
      (define new-blocks
        (append (list (cons 'main (Block '() main-prelude))
                      (cons 'conclusion (Block '() conclusion)))
@@ -360,8 +382,6 @@
             
      (X86Program (dict-set info 'conflicts g) blocks)]))
 
-(require "priority_queue.rkt")
-
 ;; Helper: Pick the smallest available color (non-negative integer)
 (define (get-lowest-color neighbors coloring)
   (define neighbor-colors (for/set ([n neighbors] #:when (dict-has-key? coloring n))
@@ -403,7 +423,19 @@
      ;; Update stack space in info for spills
      (define max-color (apply max -1 (hash-values coloring)))
      (define spills (max 0 (add1 (- max-color (num-registers-for-alloc)))))
-     (X86Program (dict-set info 'stack-space (* 8 spills)) new-blocks)]))
+     
+     (define used-callee 
+        (for/set ([color (hash-values coloring)]
+            #:when (and (>= color 0) (< color (num-registers-for-alloc))))
+            (color->register color)))
+
+      (define used-callee-list 
+        (set->list (set-intersect used-callee callee-save)))
+
+      
+      (X86Program (dict-set (dict-set info 'stack-space (* 8 spills)) 
+                      'used-callee used-callee-list) 
+              new-blocks)]))
 
 ;; Define the compiler passes to be used by interp-tests and the grader
 ;; Note that your compiler file (the file that defines the passes)
