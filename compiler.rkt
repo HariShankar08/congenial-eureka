@@ -10,6 +10,7 @@
 (require "utilities.rkt")
 (require graph)
 (require "multigraph.rkt")
+(require "priority_queue.rkt")
 (provide (all-defined-out))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -348,20 +349,64 @@
             (build-interference-helper i la g))]))
             
      (X86Program (dict-set info 'conflicts g) blocks)]))
+
+(require "priority_queue.rkt")
+
+;; Helper: Pick the smallest available color (non-negative integer)
+(define (get-lowest-color neighbors coloring)
+  (define neighbor-colors (for/set ([n neighbors] #:when (dict-has-key? coloring n))
+                             (dict-ref coloring n)))
+  (let loop ([c 0])
+    (if (set-member? neighbor-colors c) (loop (add1 c)) c)))
+
+(define (allocate-registers p)
+  (match p
+    [(X86Program info blocks)
+     (define g (dict-ref info 'conflicts))
+     (define vars (map fst (dict-ref info 'locals-types '())))
+     ;; Pre-color registers based on their standard indices
+     (define coloring (for/hash ([r (in-vertices g)] #:when (set-member? registers r))
+                        (values r (register->color r))))
      
+     ;; DSATUR coloring: we color variables greedily
+     (for ([v vars])
+       (define color (get-lowest-color (get-neighbors g v) coloring))
+       (set! coloring (hash-set coloring v color)))
+
+     ;; Map colors to specific locations (registers or stack)
+     (define (color->arg c)
+       (if (and (>= c 0) (< c (num-registers-for-alloc)))
+           (Reg (color->register c))
+           (Deref 'rbp (* -8 (- c (num-registers-for-alloc) -1)))))
+
+     (define (assign-arg a)
+       (match a [(Var x) (color->arg (hash-ref coloring x))] [else a]))
+
+     (define (assign-instr i)
+       (match i [(Instr op args) (Instr op (map assign-arg args))] [else i]))
+
+     (define new-blocks
+       (for/list ([(label block) (in-dict blocks)])
+         (match block [(Block b-info instrs) 
+                       (cons label (Block b-info (map assign-instr instrs)))])))
+     
+     ;; Update stack space in info for spills
+     (define max-color (apply max -1 (hash-values coloring)))
+     (define spills (max 0 (add1 (- max-color (num-registers-for-alloc)))))
+     (X86Program (dict-set info 'stack-space (* 8 spills)) new-blocks)]))
+
 ;; Define the compiler passes to be used by interp-tests and the grader
 ;; Note that your compiler file (the file that defines the passes)
 ;; must be named "compiler.rkt"
 (define compiler-passes
   `(
-     ;; Uncomment the following passes as you finish them.
      ("uniquify" ,uniquify ,interp_Lvar ,type-check-Lvar)
      ("remove complex opera*" ,remove-complex-opera* ,interp_Lvar ,type-check-Lvar)
      ("explicate control" ,explicate-control ,interp-Cvar ,type-check-Cvar)
      ("instruction selection" ,select-instructions ,interp-pseudo-x86-0)
-     ("uncover-live" ,uncover-live ,interp-pseudo-x86-0)
+     ("uncover live" ,uncover-live ,interp-pseudo-x86-0)
      ("build interference" ,build-interference ,interp-pseudo-x86-0)
-     ("assign homes" ,assign-homes ,interp-x86-0)
+     ("allocate registers" ,allocate-registers ,interp-x86-0)
      ("patch instructions" ,patch-instructions ,interp-x86-0)
      ("prelude-and-conclusion" ,prelude-and-conclusion ,interp-x86-0)
      ))
