@@ -211,21 +211,31 @@
             (cons label (Block b-info (map assign-instr instrs)))])))
      (X86Program (dict-set info 'stack-space (* 8 (length vars))) new-blocks)]))
 
-;; patch-instructions : x86var -> x86int
+;; Helper for Pass 8 (Updated for Exercise 3.5)
+;; Ensures at most one memory access per instruction and deletes trivial moves.
+(define (patch-instr-helper i)
+  (match i
+    ;; Delete trivial moves where source and destination are the same
+    [(Instr 'movq (list src dest)) #:when (equal? src dest)
+     '()]
+    
+    ;; Fix instructions with two memory accesses
+    [(Instr op (list (Deref r1 o1) (Deref r2 o2)))
+     (list (Instr 'movq (list (Deref r1 o1) (Reg 'rax)))
+           (Instr op (list (Reg 'rax) (Deref r2 o2))))]
+    
+    ;; Keep all other instructions as-is
+    [else (list i)]))
+
+;; Main patch-instructions pass
 (define (patch-instructions p)
   (match p
     [(X86Program info blocks)
-     (define (patch-instr i)
-       (match i
-         [(Instr op (list (Deref r1 o1) (Deref r2 o2)))
-          (list (Instr 'movq (list (Deref r1 o1) (Reg 'rax)))
-                (Instr op (list (Reg 'rax) (Deref r2 o2))))]
-         [else (list i)]))
      (define new-blocks
        (for/list ([(label block) (in-dict blocks)])
          (match block
            [(Block b-info instrs)
-            (cons label (Block b-info (append-map patch-instr instrs)))])))
+            (cons label (Block b-info (append-map patch-instr-helper instrs)))])))
      (X86Program info new-blocks)]))
 
 
