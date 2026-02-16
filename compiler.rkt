@@ -8,6 +8,8 @@
 (require "type-check-Lvar.rkt")
 (require "type-check-Cvar.rkt")
 (require "utilities.rkt")
+(require graph)
+(require "multigraph.rkt")
 (provide (all-defined-out))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -298,6 +300,55 @@
   ;; in a custom struct or just return the instr.
   instr)
 
+;; Helper for build-interference
+;; Updates the interference graph based on an instruction and its live-after set
+(define (build-interference-helper i live-after graph)
+  (match i
+    [(Instr 'movq (list src dest))
+     (for ([v live-after])
+       (for ([d (get-vars dest)])
+         ;; In movq s, d: d interferes with v if v != d AND v != s
+         (unless (or (equal? v d) (equal? v (get-vars src)))
+           (add-edge! graph v d))))]
+    [(Instr op (list src dest))
+     (for ([v live-after])
+       (for ([d (get-vars dest)])
+         (unless (equal? v d)
+           (add-edge! graph v d))))]
+    [(Instr op (list dest))
+     (for ([v live-after])
+       (for ([d (get-vars dest)])
+         (unless (equal? v d)
+           (add-edge! graph v d))))]
+    [(Instr 'callq (list target))
+     ;; After a call, all caller-save registers interfere with all live variables
+     (for ([v live-after])
+       (for ([r (set->list caller-save)])
+         (unless (equal? v r)
+           (add-edge! graph v r))))]
+    [else (void)]))
+
+(define (build-interference p)
+  (match p
+    [(X86Program info blocks)
+     (define locals (map fst (dict-ref info 'locals-types '())))
+     ;; Use undirected-graph from the 'graph' library
+     (define g (undirected-graph '()))
+     
+     ;; Add vertices for all variables and general-purpose registers
+     (for ([v (append locals (vector->list general-registers))])
+       (add-vertex! g v))
+     
+     (for ([(label block) (in-dict blocks)])
+       (match block
+         [(Block b-info instrs)
+          ;; Ensure 'live-after-sets' exists in the block info from uncover-live
+          (define live-afters (dict-ref b-info 'live-after-sets '()))
+          (for ([i instrs] [la live-afters])
+            (build-interference-helper i la g))]))
+            
+     (X86Program (dict-set info 'conflicts g) blocks)]))
+     
 ;; Define the compiler passes to be used by interp-tests and the grader
 ;; Note that your compiler file (the file that defines the passes)
 ;; must be named "compiler.rkt"
@@ -308,8 +359,9 @@
      ("remove complex opera*" ,remove-complex-opera* ,interp_Lvar ,type-check-Lvar)
      ("explicate control" ,explicate-control ,interp-Cvar ,type-check-Cvar)
      ("instruction selection" ,select-instructions ,interp-pseudo-x86-0)
+     ("uncover-live" ,uncover-live ,interp-pseudo-x86-0)
+     ("build interference" ,build-interference ,interp-pseudo-x86-0)
      ("assign homes" ,assign-homes ,interp-x86-0)
      ("patch instructions" ,patch-instructions ,interp-x86-0)
      ("prelude-and-conclusion" ,prelude-and-conclusion ,interp-x86-0)
-     ("uncover-live" ,uncover-live ,interp-pseudo-x86-0)
      ))
