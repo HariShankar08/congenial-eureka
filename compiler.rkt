@@ -202,6 +202,15 @@
          (cons label (Block '() (select-instr-tail tail)))))
      (X86Program info new-blocks)]))
 
+(define (op->cc op)
+  (match op
+    ['eq? 'e]
+    ['<   'l]
+    ['<=  'le]
+    ['>   'g]
+    ['>=  'ge]
+    [else (error "op->cc unhandled operator" op)]))
+
 (define (select-instr-tail t)
   (match t
     [(Return e)
@@ -210,7 +219,14 @@
     [(Seq stmt tail)
      (append (select-instr-stmt stmt)
              (select-instr-tail tail))]
-    [else (error "select-instr-tail unhandled case" t)]))
+    [(Goto label) (list (Jmp label))]
+    [(IfStmt (Prim op (list e1 e2)) (Goto thn) (Goto els))
+     (list (Instr 'cmpq (list (select-atom e2) (select-atom e1)))
+           (JmpIf (op->cc op) thn)
+           (Jmp els))]
+    [else (error "select-instr-tail unhandled case" t)]
+  )
+)
 
 (define (select-instr-stmt s)
   (match s
@@ -221,6 +237,8 @@
   (match e
     [(Int n) (list (Instr 'movq (list (Imm n) dest)))]
     [(Var x) (list (Instr 'movq (list (Var x) dest)))]
+    [(Bool #t) (list (Instr 'movq (list (Imm 1) dest)))]
+    [(Bool #f) (list (Instr 'movq (list (Imm 0) dest)))]
     [(Prim 'read '()) (list (Instr 'callq (list 'read_int))
                             (Instr 'movq (list (Reg 'rax) dest)))]
     [(Prim '+ (list e1 e2))
@@ -228,12 +246,26 @@
            (Instr 'addq (list (select-atom e2) dest)))]
     [(Prim '- (list e1))
      (list (Instr 'movq (list (select-atom e1) dest))
-           (Instr 'negq (list dest)))]))
+           (Instr 'negq (list dest)))]
+    [(Prim op (list e1 e2)) #:when (set-member? '(< <= > >= eq?) op)
+     (list (Instr 'cmpq (list (select-atom e2) (select-atom e1)))
+           (Instr 'set (list (op->cc op) (ByteReg 'al)))
+           (Instr 'movzbq (list (ByteReg 'al) dest)))]
+    [else (error "select-instr-exp unhandled case" e)]
+  )
+)
 
 (define (select-atom a)
   (match a
     [(Int n) (Imm n)]
-    [(Var x) (Var x)]))
+    [(Var x) (Var x)]
+    [(Bool #t) (Imm 1)]
+    [(Bool #f) (Imm 0)]
+    [else (error "select-atom unhandled case" a)]
+  )
+)
+
+
     
 ;; assign-homes : x86var -> x86var
 (define (assign-homes p)
