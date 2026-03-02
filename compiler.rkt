@@ -130,28 +130,68 @@
   (match e
     [(Var x) (Return (Var x))]
     [(Int n) (Return (Int n))]
+    [(Bool b) (Return (Bool b))] 
     [(Prim op es) (Return (Prim op es))]
     [(Let x rhs body) (explicate_assign rhs x (explicate_tail body))]
-    [else (error "explicate_tail unhandled case" e)])
+    [(If cnd thn els) 
+     (explicate_pred cnd (explicate_tail thn) (explicate_tail els))]
+    [else (error "explicate_tail unhandled case" e)]
+  )
 )
-
 (define (explicate_assign e x cont) 
   (match e
     [(Var y) (Seq (Assign (Var x) (Var y)) cont)]
     [(Int n) (Seq (Assign (Var x) (Int n)) cont)]
+    [(Bool b) (Seq (Assign (Var x) (Bool b)) cont)]
     [(Prim op es) (Seq (Assign (Var x) (Prim op es)) cont)]
     [(Let y rhs body) (explicate_assign rhs y (explicate_assign body x cont))]
-    
+    [(If cnd thn els) 
+     (explicate_pred cnd 
+                     (explicate_assign thn x cont) 
+                     (explicate_assign els x cont))]
+    [else (error "explicate_assign unhandled case" e)]
   )
 )
 
+(define (explicate_pred cnd thn els)
+  (match cnd
+    [(Var x) (IfStmt (Prim 'eq? (list (Var x) (Bool #t))) 
+                     (create_block thn) 
+                     (create_block els))]
+    [(Let x rhs body) (explicate_assign rhs x (explicate_pred body thn els))]
+    [(Prim 'not (list e)) (explicate_pred e els thn)] ; Flip thn and els
+    [(Prim op es) #:when (or (eq? op 'eq?) (eq? op '<) (eq? op '<=) (eq? op '>) (eq? op '>=))
+     (IfStmt (Prim op es) (create_block thn) (create_block els))]
+    [(Bool b) (if b thn els)]
+    [(If cnd^ thn^ els^) 
+     (explicate_pred cnd^ 
+                     (explicate_pred thn^ thn els) 
+                     (explicate_pred els^ thn els))]
+    [else (error "explicate_pred unhandled case" cnd)]
+  )
+)
+
+;; This needs to be defined within explicate-control or have access to a block dictionary
+(define (create_block tail)
+  (match tail
+    [(Goto label) label]
+    [else
+     (define label (gensym 'block))
+     (set! global-blocks (dict-set global-blocks label (Block '() tail)))
+     (Goto label)]
+  )
+)
+(define global-blocks '())
+
 (define (explicate-control p)
- (match p
+  (match p
     [(Program info e) 
-      (define tail (explicate_tail e))
-      (define blocks (dict-set '() 'start tail))
-      (CProgram info blocks)
-    ]))
+     (set! global-blocks '())
+     (define tail (explicate_tail e))
+     (define blocks (dict-set global-blocks 'start tail))
+     (CProgram info blocks)]
+  )
+)
   
 ;; select-instructions : Cvar -> x86var
 (define (select-instructions p)
