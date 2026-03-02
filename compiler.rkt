@@ -4,9 +4,11 @@
 (require "interp-Lint.rkt")
 (require "interp-Lvar.rkt")
 (require "interp-Cvar.rkt")
+(require "interp-Lif.rkt")
 (require "interp.rkt")
 (require "type-check-Lvar.rkt")
 (require "type-check-Cvar.rkt")
+(require "type-check-Lif.rkt")
 (require "utilities.rkt")
 (require graph)
 (require "multigraph.rkt")
@@ -437,12 +439,39 @@
                       'used-callee used-callee-list) 
               new-blocks)]))
 
+
+;; Lif passes
+
+;; shrink-exp : LIf -> LIf
+(define (shrink-exp e)
+  (match e
+    [(Var x) (Var x)]
+    [(Int n) (Int n)]
+    [(Bool b) (Bool b)]
+    [(Let x rhs body)
+     (Let x (shrink-exp rhs) (shrink-exp body))]
+    [(If cnd thn els)
+     (If (shrink-exp cnd) (shrink-exp thn) (shrink-exp els))]
+    [(Prim 'and (list e1 e2))
+     (If (shrink-exp e1) (shrink-exp e2) (Bool #f))]
+    [(Prim 'or (list e1 e2))
+     (If (shrink-exp e1) (Bool #t) (shrink-exp e2))]
+    [(Prim op es)
+     (Prim op (for/list ([e es]) (shrink-exp e)))]
+    [else (error "shrink-exp unhandled case" e)]))
+
+(define (shrink p)
+  (match p
+    [(Program info e) (Program info (shrink-exp e))]))
+
+
 ;; Define the compiler passes to be used by interp-tests and the grader
 ;; Note that your compiler file (the file that defines the passes)
 ;; must be named "compiler.rkt"
 (define compiler-passes
   `(
-     ("uniquify" ,uniquify ,interp_Lvar ,type-check-Lvar)
+     ("uniquify",uniquify ,interp_Lvar ,type-check-Lvar)
+     ("shrink" ,shrink ,interp-Lif ,type-check-Lif)
      ("remove complex opera*" ,remove-complex-opera* ,interp_Lvar ,type-check-Lvar)
      ("explicate control" ,explicate-control ,interp-Cvar ,type-check-Cvar)
      ("instruction selection" ,select-instructions ,interp-pseudo-x86-0)
