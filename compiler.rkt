@@ -68,6 +68,7 @@
       [(Var x)
        (Var (dict-ref env x x))]
       [(Int n) (Int n)]
+      [(Bool b) (Bool b)]
       [(Let x e body)
        (define new-x (gensym x))
        (define new-e ((uniquify-exp env) e))
@@ -76,6 +77,10 @@
        
        (Let new-x new-e new-body)
        ]
+      [(If cnd thn els)
+       (If ((uniquify-exp env) cnd)
+           ((uniquify-exp env) thn)
+           ((uniquify-exp env) els))] 
       [(Prim op es)
        (Prim op (for/list ([e es]) ((uniquify-exp env) e)))])))
 
