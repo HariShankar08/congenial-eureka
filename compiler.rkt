@@ -372,15 +372,42 @@
 (define (uncover-live-block b)
   (match b
     [(Block info instrs)
-     (define-values (new-instrs final-live)
+     ;; instrs may be either a list of x86 instructions or a "tail"
+     ;; AST created by the Lif/explicate-control passes. If it's a tail
+     ;; form, convert it to x86 instruction sequence first.
+     (define instr-list
+       (cond
+         ;; Already a proper instruction list (first element is an Instr/Jmp/JmpIf/Retq)
+         [(and (pair? instrs)
+               (or (Instr? (car instrs)) (Jmp? (car instrs)) (JmpIf? (car instrs)) (Retq? (car instrs))))
+          instrs]
+         ;; A tail-form produced during Lif processing: convert to instrs
+         [(or (Return? instrs) (Seq? instrs) (Goto? instrs) (IfStmt? instrs))
+          (select-instr-tail instrs)]
+         ;; Fallback: if it's a list, assume it's already an instr sequence,
+         ;; otherwise try to convert via select-instr-tail.
+         [(list? instrs) instrs]
+         [else (select-instr-tail instrs)]))
+
+     ;; Perform backward liveness pass, collecting per-instruction live-after sets
+     (define-values (new-instrs final-live live-sets)
        (for/fold ([acc-instrs '()]
-                  [live-after (set)])
-                 ([instr (reverse instrs)])
-         (let* ([live-before (compute-live-before instr live-after)]
-                ;; Store the liveness information in the instruction info
+                  [live-after (set)]
+                  [acc-live-sets '()])
+                 ([instr (reverse instr-list)])
+         (let* ([instr-live-after live-after]
+                [live-before (compute-live-before instr live-after)]
+                ;; Optionally attach liveness to the instruction itself
                 [instr-with-live (add-live-to-instr instr live-after)])
-           (values (cons instr-with-live acc-instrs) live-before))))
-     (Block (dict-set info 'live-after final-live) new-instrs)]))
+           (values (cons instr-with-live acc-instrs)
+                   live-before
+                   (cons instr-live-after acc-live-sets)))))
+
+     ;; Attach both a final live set and the per-instruction live-after sets
+     (Block (dict-set (dict-set info 'live-after final-live)
+                      'live-after-sets live-sets)
+            new-instrs)]
+    [else b]))
 
 ;; Helper to extract variables/registers from an instruction's arguments
 (define (get-vars arg)
