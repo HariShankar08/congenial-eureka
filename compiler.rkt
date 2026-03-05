@@ -481,9 +481,33 @@
      (for ([(label block) (in-dict blocks)])
        (match block
          [(Block b-info instrs)
-          ;; Ensure 'live-after-sets' exists in the block info from uncover-live
+          ;; Normalize instruction sequence: some blocks may contain
+          ;; Lif-created tail forms instead of flat instruction lists.
+          (define instr-list
+            (cond
+              [(and (pair? instrs)
+                    (or (Instr? (car instrs)) (Jmp? (car instrs)) (JmpIf? (car instrs)) (Retq? (car instrs))))
+               instrs]
+              [(list? instrs) instrs]
+              [else (select-instr-tail instrs)]))
+
+          ;; Get per-instruction live-after sets if available; otherwise
+          ;; fall back to the block-level live-after set produced by uncover-live.
           (define live-afters (dict-ref b-info 'live-after-sets '()))
-          (for ([i instrs] [la live-afters])
+          (define block-live (dict-ref b-info 'live-after (set)))
+          (when (null? live-afters)
+            (set! live-afters (for/list ([i (in-list instr-list)]) block-live)))
+
+          ;; Ensure lists are the same length: pad/truncate as needed
+          (define n-instr (length instr-list))
+          (define n-live (length live-afters))
+          (cond
+            [(< n-live n-instr)
+             (set! live-afters (append live-afters (make-list (- n-instr n-live) block-live)))]
+            [(> n-live n-instr)
+             (set! live-afters (take live-afters n-instr))])
+
+          (for ([i instr-list] [la live-afters])
             (build-interference-helper i la g))]))
             
      (X86Program (dict-set info 'conflicts g) blocks)]))
