@@ -298,11 +298,28 @@
     [(Instr 'movq (list src dest)) #:when (equal? src dest)
      '()]
     
-    ;; Fix instructions with two memory accesses
+    ;; cmpq: second argument must NOT be an immediate. Handle immediates
+    ;; by moving the immediate into `rax` and comparing against that.
+    [(Instr 'cmpq (list (Imm n1) (Imm n2)))
+     (list (Instr 'movq (list (Imm n2) (Reg 'rax)))
+       (Instr 'cmpq (list (Imm n1) (Reg 'rax))))]
+
+    [(Instr 'cmpq (list src (Imm n)))
+     (list (Instr 'movq (list (Imm n) (Reg 'rax)))
+       (Instr 'cmpq (list src (Reg 'rax))))]
+
+    ;; movzbq: destination must be a register. If it's memory, move via rax.
+    [(Instr 'movzbq (list src dest))
+     (match dest
+   [(Reg r) (list i)]
+   [else (list (Instr 'movzbq (list src (Reg 'rax)))
+       (Instr 'movq (list (Reg 'rax) dest)))])]
+
+    ;; Fix instructions with two memory accesses: move first memory to rax.
     [(Instr op (list (Deref r1 o1) (Deref r2 o2)))
      (list (Instr 'movq (list (Deref r1 o1) (Reg 'rax)))
-           (Instr op (list (Reg 'rax) (Deref r2 o2))))]
-    
+       (Instr op (list (Reg 'rax) (Deref r2 o2))))]
+
     ;; Keep all other instructions as-is
     [else (list i)]))
 
