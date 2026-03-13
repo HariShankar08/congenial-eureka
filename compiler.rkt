@@ -135,52 +135,104 @@
     [(Program info e) (Program info (rco-exp e))]))
 
 ;; explicate-control : Lvar^mon -> Cvar
+(define (explicate_effect e cont)
+  (match e
+    [(Var x) cont]
+    [(Int n) cont]
+    [(Bool b) cont]
+    [(Void) cont]
+    [(Let x rhs body) 
+     (explicate_assign rhs x (explicate_effect body cont))]
+    [(If cnd thn els) 
+     (explicate_pred cnd (explicate_effect thn cont) (explicate_effect els cont))]
+    [(Prim op es) cont]
+    [(SetBang x rhs) 
+     (explicate_assign rhs x cont)]
+    [(Begin es body)
+     (foldr (lambda (expr c) (explicate_effect expr c))
+            (explicate_effect body cont)
+            es)]
+    [(WhileLoop cnd body)
+     (define loop-label (gensym 'loop))
+     (define loop-cont (Goto loop-label))
+     (set! global-blocks 
+           (dict-set global-blocks loop-label
+                     (explicate_pred cnd (explicate_effect body loop-cont) cont)))
+     loop-cont]
+    [else (error "explicate_effect unhandled case" e)]))
 
 (define (explicate_tail e) 
   (match e
     [(Var x) (Return (Var x))]
     [(Int n) (Return (Int n))]
     [(Bool b) (Return (Bool b))] 
+    [(Void) (Return (Void))]
     [(Prim op es) (Return (Prim op es))]
     [(Let x rhs body) (explicate_assign rhs x (explicate_tail body))]
     [(If cnd thn els) 
      (explicate_pred cnd (explicate_tail thn) (explicate_tail els))]
-    [else (error "explicate_tail unhandled case" e)]
-  )
-)
+    [(SetBang x rhs) 
+     (explicate_assign rhs x (Return (Void)))]
+    [(Begin es body)
+     (foldr (lambda (expr c) (explicate_effect expr c))
+            (explicate_tail body)
+            es)]
+    [(WhileLoop cnd body)
+     (define loop-label (gensym 'loop))
+     (define loop-cont (Goto loop-label))
+     (set! global-blocks 
+           (dict-set global-blocks loop-label
+                     (explicate_pred cnd (explicate_effect body loop-cont) (Return (Void)))))
+     loop-cont]
+    [else (error "explicate_tail unhandled case" e)]))
+
 (define (explicate_assign e x cont) 
   (match e
     [(Var y) (Seq (Assign (Var x) (Var y)) cont)]
     [(Int n) (Seq (Assign (Var x) (Int n)) cont)]
     [(Bool b) (Seq (Assign (Var x) (Bool b)) cont)]
+    [(Void) (Seq (Assign (Var x) (Void)) cont)]
     [(Prim op es) (Seq (Assign (Var x) (Prim op es)) cont)]
     [(Let y rhs body) (explicate_assign rhs y (explicate_assign body x cont))]
     [(If cnd thn els) 
      (explicate_pred cnd 
                      (explicate_assign thn x cont) 
                      (explicate_assign els x cont))]
-    [else (error "explicate_assign unhandled case" e)]
-  )
-)
+    [(SetBang y rhs)
+     (explicate_assign rhs y (Seq (Assign (Var x) (Void)) cont))]
+    [(Begin es body)
+     (foldr (lambda (expr c) (explicate_effect expr c))
+            (explicate_assign body x cont)
+            es)]
+    [(WhileLoop cnd body)
+     (define loop-label (gensym 'loop))
+     (define loop-cont (Goto loop-label))
+     (set! global-blocks 
+           (dict-set global-blocks loop-label
+                     (explicate_pred cnd (explicate_effect body loop-cont) (Seq (Assign (Var x) (Void)) cont))))
+     loop-cont]
+    [else (error "explicate_assign unhandled case" e)]))
 
 (define (explicate_pred cnd thn els)
   (match cnd
     [(Var x) (IfStmt (Prim 'eq? (list (Var x) (Bool #t))) 
                      (create_block thn) 
                      (create_block els))]
+    [(Bool b) (if b thn els)]
     [(Let x rhs body) (explicate_assign rhs x (explicate_pred body thn els))]
-    [(Prim 'not (list e)) (explicate_pred e els thn)] ; Flip thn and els
+    [(Prim 'not (list e)) (explicate_pred e els thn)]
     [(Prim op es) #:when (or (eq? op 'eq?) (eq? op '<) (eq? op '<=) (eq? op '>) (eq? op '>=))
      (IfStmt (Prim op es) (create_block thn) (create_block els))]
-    [(Bool b) (if b thn els)]
     [(If cnd^ thn^ els^) 
      (explicate_pred cnd^ 
                      (explicate_pred thn^ thn els) 
                      (explicate_pred els^ thn els))]
-    [else (error "explicate_pred unhandled case" cnd)]
-  )
-)
-
+    [(Begin es body)
+     (foldr (lambda (expr c) (explicate_effect expr c))
+            (explicate_pred body thn els)
+            es)]
+    [else (error "explicate_pred unhandled case" cnd)]))
+    
 ;; This needs to be defined within explicate-control or have access to a block dictionary
 (define (create_block tail)
   (match tail
