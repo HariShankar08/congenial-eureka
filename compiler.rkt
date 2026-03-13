@@ -91,39 +91,49 @@
 
 ;; remove-complex-opera* : Lvar -> Lvar^mon
 
-
-(define (rco-atom e)
-  (match e
-  [(Var x) (values (Var x) '())]
-  [(Int n) (values (Int n) '())]
-  [else
-    (define tmp (gensym 'tmp))
-    (define new-e (rco-exp e))
-    (values (Var tmp) (dict-set '() tmp new-e))]))
-
 (define (rco-exp e)
   (match e
     [(Var x) (Var x)]
     [(Int n) (Int n)]
+    [(Bool b) (Bool b)]
+    [(Void) (Void)]
     [(Let x rhs body)
      (Let x (rco-exp rhs) (rco-exp body))]
     [(Prim op es)
      (define-values (atoms bindings-lists)
        (for/lists (n1 n2) ([arg es])
          (rco-atom arg)))
-     
      (define all-bindings (apply append bindings-lists))
      (define core (Prim op atoms))
-     
      (for/fold ([body core])
                ([(lhs rhs) (in-dict (reverse all-bindings))])
-       (Let lhs rhs body))]))
+       (Let lhs rhs body))]
+    [(If cnd thn els) 
+     (If (rco-exp cnd) (rco-exp thn) (rco-exp els))]
+    [(SetBang x rhs) 
+     (SetBang x (rco-exp rhs))]
+    [(GetBang x) 
+     (GetBang x)]
+    [(Begin es body) 
+     (Begin (for/list ([e es]) (rco-exp e)) (rco-exp body))]
+    [(WhileLoop cnd body) 
+     (WhileLoop (rco-exp cnd) (rco-exp body))]))
 
+(define (rco-atom e)
+  (match e
+    [(Var x) (values (Var x) '())]
+    [(Int n) (values (Int n) '())]
+    [(Bool b) (values (Bool b) '())]
+    [(Void) (values (Void) '())]
+    [else
+     (define tmp (gensym 'tmp))
+     (define new-e (rco-exp e))
+     (values (Var tmp) (list (cons tmp new-e)))]))
 
 (define (remove-complex-opera* p)
   (match p
     [(Program info e) (Program info (rco-exp e))]))
-  
+
 ;; explicate-control : Lvar^mon -> Cvar
 
 (define (explicate_tail e) 
@@ -615,7 +625,7 @@
 (define (shrink p)
   (match p
     [(Program info e) (Program info (shrink-exp e))]))
-    
+
 
 ;; Define the compiler passes to be used by interp-tests and the grader
 ;; Note that your compiler file (the file that defines the passes)
