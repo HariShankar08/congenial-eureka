@@ -586,13 +586,12 @@
 
 
 ;; Lif passes
-
-;; shrink-exp : LIf -> LIf
 (define (shrink-exp e)
   (match e
     [(Var x) (Var x)]
     [(Int n) (Int n)]
     [(Bool b) (Bool b)]
+    [(Void) (Void)]
     [(Let x rhs body)
      (Let x (shrink-exp rhs) (shrink-exp body))]
     [(If cnd thn els)
@@ -603,12 +602,20 @@
      (If (shrink-exp e1) (Bool #t) (shrink-exp e2))]
     [(Prim op es)
      (Prim op (for/list ([e es]) (shrink-exp e)))]
+    [(SetBang x rhs) 
+     (SetBang x (shrink-exp rhs))]
+    [(GetBang x) 
+     (GetBang x)]
+    [(Begin es body) 
+     (Begin (for/list ([e es]) (shrink-exp e)) (shrink-exp body))]
+    [(WhileLoop cnd body) 
+     (WhileLoop (shrink-exp cnd) (shrink-exp body))]
     [else (error "shrink-exp unhandled case" e)]))
 
 (define (shrink p)
   (match p
     [(Program info e) (Program info (shrink-exp e))]))
-
+    
 
 ;; Define the compiler passes to be used by interp-tests and the grader
 ;; Note that your compiler file (the file that defines the passes)
