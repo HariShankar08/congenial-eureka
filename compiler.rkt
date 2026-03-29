@@ -444,101 +444,134 @@
 (define (uncover-live p)
   (match p
     [(X86Program info blocks)
-     (X86Program info
+     (define block-instrs
+       (for/hash ([(label block) (in-dict blocks)])
+         (match block
+           [(Block _ instrs)
+            (define instrs-list
+              (cond
+                [(and (pair? instrs) (or (Instr? (car instrs)) (Jmp? (car instrs)) (JmpIf? (car instrs)) (Retq? (car instrs))))
+                 instrs]
+                [(list? instrs) instrs]
+                [else (select-instr-tail instrs)]))
+            (values label instrs-list)])))
+     
+     (define live-before-map (make-hash))
+     (for ([(label _) (in-dict blocks)]) (hash-set! live-before-map label (set)))
+     
+     ;; Graph edges for worklist (predecessors mapping)
+     (define preds-map (make-hash))
+     (for ([(label instrs) (in-hash block-instrs)])
+       (for ([i (in-list instrs)] #:when (or (Jmp? i) (JmpIf? i)))
+         (define t (match i [(Jmp tgt) tgt] [(JmpIf cc tgt) tgt]))
+         (hash-set! preds-map t (set-add (hash-ref preds-map t (set)) label))))
+     
+     (define worklist (map car (dict->list blocks)))
+     
+     (let loop ()
+       (unless (null? worklist)
+         (define label (car worklist))
+         (set! worklist (cdr worklist))
+         
+         (define instrs (hash-ref block-instrs label))
+         (define live-before
+           (for/fold ([live-after (set)]) ([instr (in-list (reverse instrs))])
+             (compute-live-before instr live-after live-before-map)))
+         
+         (define old-live-before (hash-ref live-before-map label))
+         (unless (equal? live-before old-live-before)
+           (hash-set! live-before-map label live-before)
+           (set! worklist (append (set->list (hash-ref preds-map label (set))) worklist)))
+         (loop)))
+         
+     (define new-blocks
        (for/list ([(label block) (in-dict blocks)])
-         (cons label (uncover-live-block block))))]))
-
-;; Performs liveness analysis on a single block (backward pass)
-(define (uncover-live-block b)
-  (match b
-    [(Block info instrs)
-     ;; instrs may be either a list of x86 instructions or a "tail"
-     ;; AST created by the Lif/explicate-control passes. If it's a tail
-     ;; form, convert it to x86 instruction sequence first.
-     (define instr-list
-       (cond
-         ;; Already a proper instruction list (first element is an Instr/Jmp/JmpIf/Retq)
-         [(and (pair? instrs)
-               (or (Instr? (car instrs)) (Jmp? (car instrs)) (JmpIf? (car instrs)) (Retq? (car instrs))))
-          instrs]
-         ;; A tail-form produced during Lif processing: convert to instrs
-         [(or (Return? instrs) (Seq? instrs) (Goto? instrs) (IfStmt? instrs))
-          (select-instr-tail instrs)]
-         ;; Fallback: if it's a list, assume it's already an instr sequence,
-         ;; otherwise try to convert via select-instr-tail.
-         [(list? instrs) instrs]
-         [else (select-instr-tail instrs)]))
-
-     ;; Perform backward liveness pass, collecting per-instruction live-after sets
-     (define-values (new-instrs final-live live-sets)
-       (for/fold ([acc-instrs '()]
-                  [live-after (set)]
-                  [acc-live-sets '()])
-                 ([instr (reverse instr-list)])
-         (let* ([instr-live-after live-after]
-                [live-before (compute-live-before instr live-after)]
-                ;; Optionally attach liveness to the instruction itself
-                [instr-with-live (add-live-to-instr instr live-after)])
-           (values (cons instr-with-live acc-instrs)
-                   live-before
-                   (cons instr-live-after acc-live-sets)))))
-
-     ;; Attach both a final live set and the per-instruction live-after sets
-     (Block (dict-set (dict-set info 'live-after final-live)
-                      'live-after-sets live-sets)
-            new-instrs)]
-    [else b]))
+         (define instrs (hash-ref block-instrs label))
+         (define b-info (match block [(Block i _) i]))
+         
+         (define-values (new-instrs final-live live-sets)
+           (for/fold ([acc-instrs '()]
+                      [live-after (set)]
+                      [acc-live-sets '()])
+                     ([instr (in-list (reverse instrs))])
+             (let* ([instr-live-after live-after]
+                    [live-before (compute-live-before instr live-after live-before-map)])
+               (values (cons instr acc-instrs)
+                       live-before
+                       (cons instr-live-after acc-live-sets)))))
+         
+         (cons label (Block (dict-set (dict-set b-info 'live-after final-live)
+                                      'live-after-sets live-sets)
+                            new-instrs))))
+     (X86Program info new-blocks)]))
 
 ;; Helper to extract variables/registers from an instruction's arguments
 (define (get-vars arg)
   (match arg
     [(Var x) (set x)]
     [(Reg r) (set r)]
+    [(ByteReg r)
+     (set (match r
+            ['ah 'rax] ['al 'rax]
+            ['bh 'rbx] ['bl 'rbx]
+            ['ch 'rcx] ['cl 'rcx]
+            ['dh 'rdx] ['dl 'rdx]
+            [else r]))]
     [else (set)]))
 
 ;; Logic to determine what variables an instruction defines (def) and uses (use)
-(define (compute-live-before instr live-after)
+(define (compute-live-before instr live-after live-before-map)
   (match instr
     [(Instr 'movq (list src dest))
      (set-union (set-remove live-after (get-vars dest)) (get-vars src))]
-    [(Instr op (list src dest)) ;; For addq, subq, etc. (dest = dest op src)
+    [(Instr 'movzbq (list src dest))
+     (set-union (set-remove live-after (get-vars dest)) (get-vars src))]
+    [(Instr op (list src dest)) #:when (set-member? '(addq subq xorq) op)
      (set-union (set-remove live-after (get-vars dest)) 
                 (get-vars src) (get-vars dest))]
+    [(Instr 'cmpq (list src dest))
+     (set-union live-after (get-vars src) (get-vars dest))]
     [(Instr 'negq (list dest))
      (set-union (set-remove live-after (get-vars dest)) (get-vars dest))]
+    [(Instr 'set (list cc dest))
+     (set-remove live-after (get-vars dest))]
+    [(Instr 'pushq (list src))
+     (set-union live-after (get-vars src))]
+    [(Instr 'popq (list dest))
+     (set-remove live-after (get-vars dest))]
     [(Instr 'callq (list target)) ;; Calls clobber caller-save registers
      (set-union (set-subtract live-after caller-save) (get-vars target))]
-    [(Retq) (set 'rax)] ;; Return uses rax
-    [(Jmp target) live-after] ;; Standard jumps don't change liveness directly
+    [(Retq) (set-union live-after (set 'rax))] ;; Return uses rax
+    [(Jmp target) 
+     (hash-ref live-before-map target (set))]
+    [(JmpIf cc target) 
+     (set-union live-after (hash-ref live-before-map target (set)))]
     [else live-after]))
-
-;; Simple wrapper to attach liveness info to instructions if your AST supports it
-;; Otherwise, this can be stored in a side-table.
-(define (add-live-to-instr instr live-set)
-  ;; Depending on your project requirements, you might wrap this 
-  ;; in a custom struct or just return the instr.
-  instr)
 
 ;; Helper for build-interference
 ;; Updates the interference graph based on an instruction and its live-after set
 (define (build-interference-helper i live-after graph)
+  (define (add-conflicts dests src-vars)
+    (for ([v live-after])
+      (for ([d dests])
+        (unless (or (equal? v d) (and src-vars (set-member? src-vars v)))
+          (add-edge! graph v d)))))
+  
   (match i
     [(Instr 'movq (list src dest))
-     (for ([v live-after])
-       (for ([d (get-vars dest)])
-         ;; In movq s, d: d interferes with v if v != d AND v != s
-         (unless (or (equal? v d) (equal? v (get-vars src)))
-           (add-edge! graph v d))))]
+     (add-conflicts (get-vars dest) (get-vars src))]
+    [(Instr 'movzbq (list src dest))
+     (add-conflicts (get-vars dest) (get-vars src))]
+    [(Instr 'cmpq (list src dest))
+     (void)] ; cmpq defines no registers
     [(Instr op (list src dest))
-     (for ([v live-after])
-       (for ([d (get-vars dest)])
-         (unless (equal? v d)
-           (add-edge! graph v d))))]
+     (add-conflicts (get-vars dest) #f)]
+    [(Instr 'set (list cc dest))
+     (add-conflicts (get-vars dest) #f)]
+    [(Instr 'pushq (list src))
+     (void)] ; pushq defines no registers
     [(Instr op (list dest))
-     (for ([v live-after])
-       (for ([d (get-vars dest)])
-         (unless (equal? v d)
-           (add-edge! graph v d))))]
+     (add-conflicts (get-vars dest) #f)]
     [(Instr 'callq (list target))
      ;; After a call, all caller-save registers interfere with all live variables
      (for ([v live-after])
