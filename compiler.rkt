@@ -97,6 +97,10 @@
     [(Int n) (Int n)]
     [(Bool b) (Bool b)]
     [(Void) (Void)]
+    [(GlobalValue x) (GlobalValue x)]
+    [(Allocate len t) (Allocate len t)]
+    [(Collect bytes) (Collect bytes)]
+    [(HasType e t) (HasType (rco-exp e) t)]
     [(Let x rhs body)
      (Let x (rco-exp rhs) (rco-exp body))]
     [(Prim op es)
@@ -125,6 +129,7 @@
     [(Int n) (values (Int n) '())]
     [(Bool b) (values (Bool b) '())]
     [(Void) (values (Void) '())]
+    [(GlobalValue x) (values (GlobalValue x) '())]
     [else
      (define tmp (gensym 'tmp))
      (define new-e (rco-exp e))
@@ -141,6 +146,9 @@
     [(Int n) cont]
     [(Bool b) cont]
     [(Void) cont]
+    [(Collect bytes) (Seq (Collect bytes) cont)]
+    [(Prim 'vector-set! es) (Seq (Prim 'vector-set! es) cont)]
+    [(HasType e t) (explicate_effect e cont)]
     [(Let x rhs body) 
      (explicate_assign rhs x (explicate_effect body cont))]
     [(If cnd thn els) 
@@ -191,6 +199,9 @@
     [(Var y) (Seq (Assign (Var x) (Var y)) cont)]
     [(Int n) (Seq (Assign (Var x) (Int n)) cont)]
     [(Bool b) (Seq (Assign (Var x) (Bool b)) cont)]
+    [(Allocate len t) (Seq (Assign (Var x) (Allocate len t)) cont)]
+    [(GlobalValue n) (Seq (Assign (Var x) (GlobalValue n)) cont)]
+    [(HasType e t) (explicate_assign e x cont)]
     [(Void) (Seq (Assign (Var x) (Void)) cont)]
     [(Prim op es) (Seq (Assign (Var x) (Prim op es)) cont)]
     [(Let y rhs body) (explicate_assign rhs y (explicate_assign body x cont))]
@@ -293,7 +304,16 @@
 (define (select-instr-stmt s)
   (match s
     [(Assign (Var x) e)
-     (select-instr-exp e (Var x))]))
+     (select-instr-exp e (Var x))]
+    [(Prim 'vector-set! (list e1 (Int i) e2))
+     (list (Instr 'movq (list (select-atom e1) (Reg 'r11)))
+           (Instr 'movq (list (select-atom e2) (Deref 'r11 (* 8 (add1 i))))))]
+    [(Collect bytes)
+     ;; The C runtime's collect() takes rootstack_ptr in %rdi and bytes in %rsi
+     (list (Instr 'movq (list (Reg 'r15) (Reg 'rdi)))
+           (Instr 'movq (list (Imm bytes) (Reg 'rsi)))
+           (Instr 'callq (list 'collect)))]
+    [else (error "select-instr-stmt unhandled case" s)]))
 
 (define (select-instr-exp e dest)
   (match e
@@ -301,7 +321,17 @@
     [(Var x) (list (Instr 'movq (list (Var x) dest)))]
     [(Bool #t) (list (Instr 'movq (list (Imm 1) dest)))]
     [(Bool #f) (list (Instr 'movq (list (Imm 0) dest)))]
-    [(Void) '()] ; We generate no x86 instructions for Void expressions
+    [(Void) '()] 
+    [(GlobalValue name)
+     (list (Instr 'movq (list (Global name) dest)))]
+    [(Allocate len type)
+     ;; tag = (length << 1) | 1
+     (define tag (bitwise-ior (arithmetic-shift len 1) 1))
+     (list
+      (Instr 'movq (list (Global 'free_ptr) (Reg 'r11)))
+      (Instr 'addq (list (Imm (+ 8 (* 8 len))) (Global 'free_ptr)))
+      (Instr 'movq (list (Imm tag) (Deref 'r11 0)))
+      (Instr 'movq (list (Reg 'r11) dest)))]
     [(Prim 'read '()) 
      (list (Instr 'callq (list 'read_int))
            (Instr 'movq (list (Reg 'rax) dest)))]
@@ -315,7 +345,12 @@
      (list (Instr 'cmpq (list (select-atom e2) (select-atom e1)))
            (Instr 'set (list (op->cc op) (ByteReg 'al)))
            (Instr 'movzbq (list (ByteReg 'al) dest)))]
+    [(Prim 'vector-ref (list e1 (Int i)))
+     (list (Instr 'movq (list (select-atom e1) (Reg 'r11)))
+           (Instr 'movq (list (Deref 'r11 (* 8 (add1 i))) dest)))]
     [else (error "select-instr-exp unhandled case" e)]))
+
+
 
 (define (select-atom a)
   (match a
@@ -414,8 +449,8 @@
      (define used-callee (dict-ref info 'used-callee '()))
      (define num-callee (length used-callee))
      (define num-spills (/ (dict-ref info 'stack-space 0) 8))
+     (define num-root-spills (dict-ref info 'num-root-spills 0))
      
-     ;; Calculate alignment: A = align(8S + 8C) - 8C
      (define ss-total (align (+ (* 8 num-spills) (* 8 num-callee)) 16))
      (define stack-adj (- ss-total (* 8 num-callee)))
      
@@ -425,10 +460,31 @@
               (Instr 'movq (list (Reg 'rsp) (Reg 'rbp))))
         (make-pushes used-callee)
         (if (zero? stack-adj) '() (list (Instr 'subq (list (Imm stack-adj) (Reg 'rsp)))))
+        
+        ;; GC Initialization (16,384 bytes for rootstack and heap)
+        (list (Instr 'movq (list (Imm 16384) (Reg 'rdi)))
+              (Instr 'movq (list (Imm 16384) (Reg 'rsi)))
+              (Instr 'callq (list 'initialize))
+              ;; Initialize the root stack pointer (%r15)
+              (Instr 'movq (list (Global 'rootstack_begin) (Reg 'r15))))
+              
+        ;; Zero out root stack slots
+        (for/list ([i (in-range 1 (add1 num-root-spills))])
+          (Instr 'movq (list (Imm 0) (Deref 'r15 (* -8 i)))))
+          
+        ;; Advance root stack pointer past the spilled variables
+        (if (zero? num-root-spills) 
+            '() 
+            (list (Instr 'addq (list (Imm (* 8 num-root-spills)) (Reg 'r15)))))
+            
         (list (Jmp 'start))))
      
      (define conclusion
        (append
+        ;; Return root stack pointer back down
+        (if (zero? num-root-spills) 
+            '() 
+            (list (Instr 'subq (list (Imm (* 8 num-root-spills)) (Reg 'r15)))))
         (if (zero? stack-adj) '() (list (Instr 'addq (list (Imm stack-adj) (Reg 'rsp)))))
         (make-pops used-callee)
         (list (Instr 'popq (list (Reg 'rbp)))
@@ -439,6 +495,7 @@
                      (cons 'conclusion (Block '() conclusion)))
                blocks))
      (X86Program info new-blocks)]))
+
 
 ;; uncover-live : x86var -> x86var
 (define (uncover-live p)
@@ -632,28 +689,45 @@
   (let loop ([c 0])
     (if (set-member? neighbor-colors c) (loop (add1 c)) c)))
 
+(define (pointer-type? t)
+  (match t
+    [`(Vector ,_ ...) #t]
+    [`(Vectorof ,_) #t]
+    [else #f]))
+
 (define (allocate-registers p)
   (match p
     [(X86Program info blocks)
      (define g (dict-ref info 'conflicts))
-     (define vars (map fst (dict-ref info 'locals-types '())))
-     ;; Pre-color registers based on their standard indices
+     (define locals-types (dict-ref info 'locals-types '()))
+     (define vars (map fst locals-types))
+     
      (define coloring (for/hash ([r (in-vertices g)] #:when (set-member? registers r))
                         (values r (register->color r))))
      
-     ;; DSATUR coloring: we color variables greedily
      (for ([v vars])
        (define color (get-lowest-color (get-neighbors g v) coloring))
        (set! coloring (hash-set coloring v color)))
 
-     ;; Map colors to specific locations (registers or stack)
-     (define (color->arg c)
+     ;; Independent counters for dense stack packing
+     (define next-root-spill 1)
+     (define next-scalar-spill 1)
+     (define color->spill-slot (make-hash))
+
+     (define (color->arg c x)
        (if (and (>= c 0) (< c (num-registers-for-alloc)))
            (Reg (color->register c))
-           (Deref 'rbp (* -8 (- c (num-registers-for-alloc) -1)))))
+           (let ([type (dict-ref locals-types x 'Any)])
+             (if (pointer-type? type)
+                 (let ([slot (hash-ref! color->spill-slot c (lambda () 
+                               (begin0 next-root-spill (set! next-root-spill (add1 next-root-spill)))))])
+                   (Deref 'r15 (* -8 slot)))
+                 (let ([slot (hash-ref! color->spill-slot c (lambda () 
+                               (begin0 next-scalar-spill (set! next-scalar-spill (add1 next-scalar-spill)))))])
+                   (Deref 'rbp (* -8 slot)))))))
 
      (define (assign-arg a)
-       (match a [(Var x) (color->arg (hash-ref coloring x))] [else a]))
+       (match a [(Var x) (color->arg (hash-ref coloring x) x)] [else a]))
 
      (define (assign-instr i)
        (match i [(Instr op args) (Instr op (map assign-arg args))] [else i]))
@@ -663,10 +737,6 @@
          (match block [(Block b-info instrs) 
                        (cons label (Block b-info (map assign-instr instrs)))])))
      
-     ;; Update stack space in info for spills
-     (define max-color (apply max -1 (hash-values coloring)))
-     (define spills (max 0 (add1 (- max-color (num-registers-for-alloc)))))
-     
      (define used-callee 
         (for/set ([color (hash-values coloring)]
             #:when (and (>= color 0) (< color (num-registers-for-alloc))))
@@ -674,10 +744,15 @@
 
       (define used-callee-list 
         (set->list (set-intersect used-callee callee-save)))
-
       
-      (X86Program (dict-set (dict-set info 'stack-space (* 8 spills)) 
-                      'used-callee used-callee-list) 
+      (define num-spills (sub1 next-scalar-spill))
+      (define num-root-spills (sub1 next-root-spill))
+
+      (X86Program (dict-set 
+                    (dict-set 
+                      (dict-set info 'stack-space (* 8 num-spills)) 
+                      'num-root-spills num-root-spills)
+                    'used-callee used-callee-list) 
               new-blocks)]))
 
 
@@ -712,14 +787,75 @@
   (match p
     [(Program info e) (Program info (shrink-exp e))]))
 
+(define (expose-alloc-exp e)
+  (match e
+    [(Var x) (Var x)]
+    [(Int n) (Int n)]
+    [(Bool b) (Bool b)]
+    [(Void) (Void)]
+    [(Let x rhs body)
+     (Let x (expose-alloc-exp rhs) (expose-alloc-exp body))]
+    [(If cnd thn els)
+     (If (expose-alloc-exp cnd) (expose-alloc-exp thn) (expose-alloc-exp els))]
+    [(Begin es body)
+     (Begin (map expose-alloc-exp es) (expose-alloc-exp body))]
+    [(SetBang x rhs)
+     (SetBang x (expose-alloc-exp rhs))]
+    [(GetBang x)
+     (GetBang x)]
+    [(WhileLoop cnd body)
+     (WhileLoop (expose-alloc-exp cnd) (expose-alloc-exp body))]
+    [(HasType (Prim 'vector es) t)
+     (define bytes (+ 8 (* 8 (length es)))) ; 8 bytes for tag + 8 per element
+     (define void-var (gensym '_))
+     (define tup-var (gensym 'alloc))
+     (define new-es (map expose-alloc-exp es))
+     
+     ;; condition: free_ptr + bytes < fromspace_end
+     (define cond-e
+       (Prim '< (list (Prim '+ (list (GlobalValue 'free_ptr) (Int bytes)))
+                      (GlobalValue 'fromspace_end))))
+     
+     ;; If not enough space, collect
+     (define thn-e (Void))
+     (define els-e (Collect bytes))
+     
+     ;; Allocate memory
+     (define alloc-e (Allocate (length es) t))
+     
+     ;; Set the fields
+     (define sets
+       (for/list ([arg new-es] [i (in-naturals)])
+         (Prim 'vector-set! (list (Var tup-var) (Int i) arg))))
+     
+     (HasType
+      (Let void-var (If cond-e thn-e els-e)
+           (Let tup-var alloc-e
+                (if (null? sets)
+                    (Var tup-var)
+                    (Begin sets (Var tup-var)))))
+      t)]
+    [(HasType e t)
+     (HasType (expose-alloc-exp e) t)]
+    [(Prim op es)
+     (Prim op (map expose-alloc-exp es))]
+    [else (error "expose-alloc-exp unhandled case" e)]))
+
+(define (expose-allocation p)
+  (match p
+    [(Program info e) (Program info (expose-alloc-exp e))]))
+
+
+
 
 ;; Define the compiler passes to be used by interp-tests and the grader
 ;; Note that your compiler file (the file that defines the passes)
 ;; must be named "compiler.rkt"
 (define compiler-passes
   `(
-     ("uniquify",uniquify ,interp_Lvar ,type-check-Lvar)
+     ("uniquify" ,uniquify ,interp_Lvar ,type-check-Lvar)
      ("shrink" ,shrink ,interp-Lif ,type-check-Lif)
+     ("expose allocation" ,expose-allocation ,interp-Lvec ,type-check-Lvec)
      ("remove complex opera*" ,remove-complex-opera* ,interp_Lvar ,type-check-Lvar)
      ("explicate control" ,explicate-control ,interp-Cvar ,type-check-Cvar)
      ("instruction selection" ,select-instructions ,interp-pseudo-x86-0)
